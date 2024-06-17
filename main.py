@@ -3,6 +3,8 @@ import copy
 import csv
 import os
 import warnings
+import matplotlib.pyplot as plt
+import cv2
 
 import numpy
 import torch
@@ -19,32 +21,32 @@ warnings.filterwarnings("ignore")
 
 def learning_rate(args, params):
     def fn(x):
-        return (1 - x / args.epochs) * (1.0 - params['lrf']) + params['lrf']
+        return (1 - x / args.epochs) * (1.0 - params["lrf"]) + params["lrf"]
 
     return fn
 
 
 def train(args, params):
     # Model
-    model = nn.yolo_v8_n(len(params['names'].values())).cuda()
+    model = nn.yolo_v8_n(len(params["names"].values())).cuda()
 
     # Optimizer
     accumulate = max(round(64 / (args.batch_size * args.world_size)), 1)
-    params['weight_decay'] *= args.batch_size * args.world_size * accumulate / 64
+    params["weight_decay"] *= args.batch_size * args.world_size * accumulate / 64
 
     p = [], [], []
     for v in model.modules():
-        if hasattr(v, 'bias') and isinstance(v.bias, torch.nn.Parameter):
+        if hasattr(v, "bias") and isinstance(v.bias, torch.nn.Parameter):
             p[2].append(v.bias)
         if isinstance(v, torch.nn.BatchNorm2d):
             p[1].append(v.weight)
-        elif hasattr(v, 'weight') and isinstance(v.weight, torch.nn.Parameter):
+        elif hasattr(v, "weight") and isinstance(v.weight, torch.nn.Parameter):
             p[0].append(v.weight)
 
-    optimizer = torch.optim.SGD(p[2], params['lr0'], params['momentum'], nesterov=True)
+    optimizer = torch.optim.SGD(p[2], params["lr0"], params["momentum"], nesterov=True)
 
-    optimizer.add_param_group({'params': p[0], 'weight_decay': params['weight_decay']})
-    optimizer.add_param_group({'params': p[1]})
+    optimizer.add_param_group({"params": p[0], "weight_decay": params["weight_decay"]})
+    optimizer.add_param_group({"params": p[1]})
     del p
 
     # Scheduler
@@ -54,11 +56,17 @@ def train(args, params):
     # EMA
     ema = util.EMA(model) if args.local_rank == 0 else None
 
-    filenames = []
-    with open('../Dataset/COCO/train2017.txt') as reader:
-        for filename in reader.readlines():
-            filename = filename.rstrip().split('/')[-1]
-            filenames.append('../Dataset/COCO/images/train2017/' + filename)
+    # filenames = []
+    # with open("../Dataset/COCO/train2017.txt") as reader:
+    #     for filename in reader.readlines():
+    #         filename = filename.rstrip().split("/")[-1]
+    #         filenames.append("../Dataset/COCO/images/train2017/" + filename)
+    directory = "dataset\\images\\train"
+    filenames = [
+        os.path.join(directory, f)
+        for f in os.listdir(directory)
+        if os.path.isfile(os.path.join(directory, f))
+    ]
 
     dataset = Dataset(filenames, args.input_size, params, True)
 
@@ -67,25 +75,32 @@ def train(args, params):
     else:
         sampler = data.distributed.DistributedSampler(dataset)
 
-    loader = data.DataLoader(dataset, args.batch_size, sampler is None, sampler,
-                             num_workers=8, pin_memory=True, collate_fn=Dataset.collate_fn)
+    loader = data.DataLoader(
+        dataset,
+        args.batch_size,
+        sampler is None,
+        sampler,
+        num_workers=8,
+        pin_memory=True,
+        collate_fn=Dataset.collate_fn,
+    )
 
     if args.world_size > 1:
         # DDP mode
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = torch.nn.parallel.DistributedDataParallel(module=model,
-                                                          device_ids=[args.local_rank],
-                                                          output_device=args.local_rank)
+        model = torch.nn.parallel.DistributedDataParallel(
+            module=model, device_ids=[args.local_rank], output_device=args.local_rank
+        )
 
     # Start training
     best = 0
     num_batch = len(loader)
     amp_scale = torch.cuda.amp.GradScaler()
     criterion = util.ComputeLoss(model, params)
-    num_warmup = max(round(params['warmup_epochs'] * num_batch), 1000)
-    with open('weights/step.csv', 'w') as f:
+    num_warmup = max(round(params["warmup_epochs"] * num_batch), 1000)
+    with open("weights/step.csv", "w") as f:
         if args.local_rank == 0:
-            writer = csv.DictWriter(f, fieldnames=['epoch', 'mAP@50', 'mAP'])
+            writer = csv.DictWriter(f, fieldnames=["epoch", "mAP@50", "mAP"])
             writer.writeheader()
         for epoch in range(args.epochs):
             model.train()
@@ -98,7 +113,7 @@ def train(args, params):
                 sampler.set_epoch(epoch)
             p_bar = enumerate(loader)
             if args.local_rank == 0:
-                print(('\n' + '%10s' * 3) % ('epoch', 'memory', 'loss'))
+                print(("\n" + "%10s" * 3) % ("epoch", "memory", "loss"))
             if args.local_rank == 0:
                 p_bar = tqdm.tqdm(p_bar, total=num_batch)  # progress bar
 
@@ -116,13 +131,13 @@ def train(args, params):
                     accumulate = max(1, numpy.interp(x, xp, fp).round())
                     for j, y in enumerate(optimizer.param_groups):
                         if j == 0:
-                            fp = [params['warmup_bias_lr'], y['initial_lr'] * lr(epoch)]
+                            fp = [params["warmup_bias_lr"], y["initial_lr"] * lr(epoch)]
                         else:
-                            fp = [0.0, y['initial_lr'] * lr(epoch)]
-                        y['lr'] = numpy.interp(x, xp, fp)
-                        if 'momentum' in y:
-                            fp = [params['warmup_momentum'], params['momentum']]
-                            y['momentum'] = numpy.interp(x, xp, fp)
+                            fp = [0.0, y["initial_lr"] * lr(epoch)]
+                        y["lr"] = numpy.interp(x, xp, fp)
+                        if "momentum" in y:
+                            fp = [params["warmup_momentum"], params["momentum"]]
+                            y["momentum"] = numpy.interp(x, xp, fp)
 
                 # Forward
                 with torch.cuda.amp.autocast():
@@ -149,8 +164,12 @@ def train(args, params):
 
                 # Log
                 if args.local_rank == 0:
-                    memory = f'{torch.cuda.memory_reserved() / 1E9:.3g}G'  # (GB)
-                    s = ('%10s' * 2 + '%10.4g') % (f'{epoch + 1}/{args.epochs}', memory, m_loss.avg)
+                    memory = f"{torch.cuda.memory_reserved() / 1E9:.3g}G"  # (GB)
+                    s = ("%10s" * 2 + "%10.4g") % (
+                        f"{epoch + 1}/{args.epochs}",
+                        memory,
+                        m_loss.avg,
+                    )
                     p_bar.set_description(s)
 
                 del loss
@@ -162,9 +181,13 @@ def train(args, params):
             if args.local_rank == 0:
                 # mAP
                 last = test(args, params, ema.ema)
-                writer.writerow({'mAP': str(f'{last[1]:.3f}'),
-                                 'epoch': str(epoch + 1).zfill(3),
-                                 'mAP@50': str(f'{last[0]:.3f}')})
+                writer.writerow(
+                    {
+                        "mAP": str(f"{last[1]:.3f}"),
+                        "epoch": str(epoch + 1).zfill(3),
+                        "mAP@50": str(f"{last[0]:.3f}"),
+                    }
+                )
                 f.flush()
 
                 # Update best mAP
@@ -172,35 +195,41 @@ def train(args, params):
                     best = last[1]
 
                 # Save model
-                ckpt = {'model': copy.deepcopy(ema.ema).half()}
+                ckpt = {"model": copy.deepcopy(ema.ema).half()}
 
                 # Save last, best and delete
-                torch.save(ckpt, './weights/last.pt')
+                torch.save(ckpt, "./weights/last.pt")
                 if best == last[1]:
-                    torch.save(ckpt, './weights/best.pt')
+                    torch.save(ckpt, "./weights/best.pt")
                 del ckpt
 
     if args.local_rank == 0:
-        util.strip_optimizer('./weights/best.pt')  # strip optimizers
-        util.strip_optimizer('./weights/last.pt')  # strip optimizers
+        util.strip_optimizer("./weights/best.pt")  # strip optimizers
+        util.strip_optimizer("./weights/last.pt")  # strip optimizers
 
     torch.cuda.empty_cache()
 
 
 @torch.no_grad()
 def test(args, params, model=None):
-    filenames = []
-    with open('../Dataset/COCO/val2017.txt') as reader:
-        for filename in reader.readlines():
-            filename = filename.rstrip().split('/')[-1]
-            filenames.append('../Dataset/COCO/images/val2017/' + filename)
-
+    # Load dataset
+    directory = "dataset\\images\\valid"
+    filenames = [
+        os.path.join(directory, f)
+        for f in os.listdir(directory)
+        if os.path.isfile(os.path.join(directory, f))
+    ]
     dataset = Dataset(filenames, args.input_size, params, False)
-    loader = data.DataLoader(dataset, 8, False, num_workers=8,
-                             pin_memory=True, collate_fn=Dataset.collate_fn)
+    # plot image
+    # image = dataset[0][0].permute(1, 2, 0).cpu().numpy()
+    # plt.imshow(image)
+    # plt.show()
 
+    loader = data.DataLoader(
+        dataset, 8, False, num_workers=8, pin_memory=True, collate_fn=Dataset.collate_fn
+    )
     if model is None:
-        model = torch.load('./weights/best.pt', map_location='cuda')['model'].float()
+        model = torch.load("./weights/best.pt", map_location="cuda")["model"].float()
 
     model.half()
     model.eval()
@@ -209,13 +238,13 @@ def test(args, params, model=None):
     iou_v = torch.linspace(0.5, 0.95, 10).cuda()  # iou vector for mAP@0.5:0.95
     n_iou = iou_v.numel()
 
-    m_pre = 0.
-    m_rec = 0.
-    map50 = 0.
-    mean_ap = 0.
+    m_pre = 0.0
+    m_rec = 0.0
+    map50 = 0.0
+    mean_ap = 0.0
     metrics = []
-    p_bar = tqdm.tqdm(loader, desc=('%10s' * 3) % ('precision', 'recall', 'mAP'))
-    for samples, targets, shapes in p_bar:
+    p_bar = tqdm.tqdm(loader, desc=("%10s" * 3) % ("precision", "recall", "mAP"))
+    for i, (samples, targets, shapes) in enumerate(p_bar):
         samples = samples.cuda()
         targets = targets.cuda()
         samples = samples.half()  # uint8 to fp16/32
@@ -224,10 +253,64 @@ def test(args, params, model=None):
 
         # Inference
         outputs = model(samples)
-
         # NMS
-        targets[:, 2:] *= torch.tensor((width, height, width, height)).cuda()  # to pixels
+        targets[:, 2:] *= torch.tensor(
+            (width, height, width, height)
+        ).cuda()  # to pixels
         outputs = util.non_max_suppression(outputs, 0.001, 0.65)
+
+        # Draw bounding boxes and save images
+        for j, output in enumerate(outputs):
+            image = samples[j].cpu().numpy().transpose(1, 2, 0) * 255
+            image = cv2.cvtColor(image.astype(numpy.uint8), cv2.COLOR_RGB2BGR)
+
+            if output is not None and len(output):
+                for *box, conf, cls in output:
+                    x1, y1, x2, y2 = map(int, box)
+                    label = f"{cls:.0f} {conf:.2f}"
+                    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(
+                        image,
+                        label,
+                        (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 255, 0),
+                        2,
+                    )
+
+            # Save image
+            output_directory = "output_images"
+            if not os.path.exists(output_directory):
+                os.makedirs(output_directory)
+
+            output_path = os.path.join(output_directory, f"image_{i}_{j}.jpg")
+            cv2.imwrite(output_path, image)
+
+        with open("test_predictions.csv", "w", newline="") as csvfile:
+            fieldnames = ["filename", "conf", "cls", "x", "y", "w", "h"]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for i, output in enumerate(outputs):
+                if output is not None:
+                    for *box, conf, cls in output:
+                        # Convert xyxy to xywh
+                        x1, y1, x2, y2 = box
+                        x = (x1 + x2) / 2 / width
+                        y = (y1 + y2) / 2 / height
+                        w = (x2 - x1) / width
+                        h = (y2 - y1) / height
+                        writer.writerow(
+                            {
+                                "filename": filenames[i],
+                                "conf": conf.item(),
+                                "cls": int(cls.item()),
+                                "x": x.item(),
+                                "y": y.item(),
+                                "w": w.item(),
+                                "h": h.item(),
+                            }
+                        )
 
         # Metrics
         for i, output in enumerate(outputs):
@@ -240,7 +323,9 @@ def test(args, params, model=None):
                 continue
 
             detections = output.clone()
-            util.scale(detections[:, :4], samples[i].shape[1:], shapes[i][0], shapes[i][1])
+            util.scale(
+                detections[:, :4], samples[i].shape[1:], shapes[i][0], shapes[i][1]
+            )
 
             # Evaluate
             if labels.shape[0]:
@@ -260,12 +345,18 @@ def test(args, params, model=None):
                 for j in range(len(iou_v)):
                     x = torch.where((iou >= iou_v[j]) & correct_class)
                     if x[0].shape[0]:
-                        matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1)
+                        matches = torch.cat(
+                            (torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1
+                        )
                         matches = matches.cpu().numpy()
                         if x[0].shape[0] > 1:
                             matches = matches[matches[:, 2].argsort()[::-1]]
-                            matches = matches[numpy.unique(matches[:, 1], return_index=True)[1]]
-                            matches = matches[numpy.unique(matches[:, 0], return_index=True)[1]]
+                            matches = matches[
+                                numpy.unique(matches[:, 1], return_index=True)[1]
+                            ]
+                            matches = matches[
+                                numpy.unique(matches[:, 0], return_index=True)[1]
+                            ]
                         correct[matches[:, 1].astype(int), j] = True
                 correct = torch.tensor(correct, dtype=torch.bool, device=iou_v.device)
             metrics.append((correct, output[:, 4], output[:, 5], labels[:, 0]))
@@ -276,7 +367,7 @@ def test(args, params, model=None):
         tp, fp, m_pre, m_rec, map50, mean_ap = util.compute_ap(*metrics)
 
     # Print results
-    print('%10.3g' * 3 % (m_pre, m_rec, mean_ap))
+    print("%10.3g" * 3 % (m_pre, m_rec, mean_ap))
 
     # Return results
     model.float()  # for training
@@ -285,30 +376,30 @@ def test(args, params, model=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input-size', default=640, type=int)
-    parser.add_argument('--batch-size', default=32, type=int)
-    parser.add_argument('--local_rank', default=0, type=int)
-    parser.add_argument('--epochs', default=500, type=int)
-    parser.add_argument('--train', action='store_true')
-    parser.add_argument('--test', action='store_true')
+    parser.add_argument("--input-size", default=640, type=int)
+    parser.add_argument("--batch-size", default=32, type=int)
+    parser.add_argument("--local_rank", default=0, type=int)
+    parser.add_argument("--epochs", default=30, type=int)
+    parser.add_argument("--train", action="store_true")
+    parser.add_argument("--test", action="store_true")
 
     args = parser.parse_args()
 
-    args.local_rank = int(os.getenv('LOCAL_RANK', 0))
-    args.world_size = int(os.getenv('WORLD_SIZE', 1))
+    args.local_rank = int(os.getenv("LOCAL_RANK", 0))
+    args.world_size = int(os.getenv("WORLD_SIZE", 1))
 
     if args.world_size > 1:
         torch.cuda.set_device(device=args.local_rank)
-        torch.distributed.init_process_group(backend='nccl', init_method='env://')
+        torch.distributed.init_process_group(backend="nccl", init_method="env://")
 
     if args.local_rank == 0:
-        if not os.path.exists('weights'):
-            os.makedirs('weights')
+        if not os.path.exists("weights"):
+            os.makedirs("weights")
 
     util.setup_seed()
     util.setup_multi_processes()
 
-    with open(os.path.join('utils', 'args.yaml'), errors='ignore') as f:
+    with open(os.path.join("utils", "args.yaml"), errors="ignore") as f:
         params = yaml.safe_load(f)
 
     if args.train:

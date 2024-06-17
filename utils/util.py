@@ -29,25 +29,27 @@ def setup_multi_processes():
     from platform import system
 
     # set multiprocess start method as `fork` to speed up the training
-    if system() != 'Windows':
-        torch.multiprocessing.set_start_method('fork', force=True)
+    if system() != "Windows":
+        torch.multiprocessing.set_start_method("fork", force=True)
 
     # disable opencv multithreading to avoid system being overloaded
     cv2.setNumThreads(0)
 
     # setup OMP threads
-    if 'OMP_NUM_THREADS' not in environ:
-        environ['OMP_NUM_THREADS'] = '1'
+    if "OMP_NUM_THREADS" not in environ:
+        environ["OMP_NUM_THREADS"] = "1"
 
     # setup MKL threads
-    if 'MKL_NUM_THREADS' not in environ:
-        environ['MKL_NUM_THREADS'] = '1'
+    if "MKL_NUM_THREADS" not in environ:
+        environ["MKL_NUM_THREADS"] = "1"
 
 
 def scale(coords, shape1, shape2, ratio_pad=None):
     if ratio_pad is None:  # calculate from img0_shape
         gain = min(shape1[0] / shape2[0], shape1[1] / shape2[1])  # gain  = old / new
-        pad = (shape1[1] - shape2[1] * gain) / 2, (shape1[0] - shape2[0] * gain) / 2  # wh padding
+        pad = (shape1[1] - shape2[1] * gain) / 2, (
+            shape1[0] - shape2[0] * gain
+        ) / 2  # wh padding
     else:
         gain = ratio_pad[0][0]
         pad = ratio_pad[1]
@@ -71,11 +73,17 @@ def make_anchors(x, strides, offset=0.5):
     anchor_points, stride_tensor = [], []
     for i, stride in enumerate(strides):
         _, _, h, w = x[i].shape
-        sx = torch.arange(end=w, dtype=x[i].dtype, device=x[i].device) + offset  # shift x
-        sy = torch.arange(end=h, dtype=x[i].dtype, device=x[i].device) + offset  # shift y
+        sx = (
+            torch.arange(end=w, dtype=x[i].dtype, device=x[i].device) + offset
+        )  # shift x
+        sy = (
+            torch.arange(end=h, dtype=x[i].dtype, device=x[i].device) + offset
+        )  # shift y
         sy, sx = torch.meshgrid(sy, sx)
         anchor_points.append(torch.stack((sx, sy), -1).view(-1, 2))
-        stride_tensor.append(torch.full((h * w, 1), stride, dtype=x[i].dtype, device=x[i].device))
+        stride_tensor.append(
+            torch.full((h * w, 1), stride, dtype=x[i].dtype, device=x[i].device)
+        )
     return torch.cat(anchor_points), torch.cat(stride_tensor)
 
 
@@ -117,7 +125,7 @@ def wh2xy(x):
 
 def non_max_suppression(prediction, conf_threshold=0.25, iou_threshold=0.45):
     nc = prediction.shape[1] - 4  # number of classes
-    xc = prediction[:, 4:4 + nc].amax(1) > conf_threshold  # candidates
+    xc = prediction[:, 4 : 4 + nc].amax(1) > conf_threshold  # candidates
 
     # Settings
     max_wh = 7680  # (pixels) maximum box width and height
@@ -157,7 +165,9 @@ def non_max_suppression(prediction, conf_threshold=0.25, iou_threshold=0.45):
         i = i[:max_det]  # limit detections
         outputs[index] = x[i]
         if (time.time() - start) > 0.5 + 0.05 * prediction.shape[0]:
-            print(f'WARNING ⚠️ NMS time limit {0.5 + 0.05 * prediction.shape[0]:.3f}s exceeded')
+            print(
+                f"WARNING ⚠️ NMS time limit {0.5 + 0.05 * prediction.shape[0]:.3f}s exceeded"
+            )
             break  # time limit exceeded
 
     return outputs
@@ -168,7 +178,7 @@ def smooth(y, f=0.05):
     nf = round(len(y) * f * 2) // 2 + 1  # number of filter elements (must be odd)
     p = numpy.ones(nf // 2)  # ones padding
     yp = numpy.concatenate((p * y[0], y, p * y[-1]), 0)  # y padded
-    return numpy.convolve(yp, numpy.ones(nf) / nf, mode='valid')  # y-smoothed
+    return numpy.convolve(yp, numpy.ones(nf) / nf, mode="valid")  # y-smoothed
 
 
 def compute_ap(tp, conf, pred_cls, target_cls, eps=1e-16):
@@ -242,9 +252,9 @@ def compute_ap(tp, conf, pred_cls, target_cls, eps=1e-16):
 
 
 def strip_optimizer(filename):
-    x = torch.load(filename, map_location=torch.device('cpu'))
-    x['model'].half()  # to FP16
-    for p in x['model'].parameters():
+    x = torch.load(filename, map_location=torch.device("cpu"))
+    x["model"].half()  # to FP16
+    for p in x["model"].parameters():
         p.requires_grad = False
     torch.save(x, filename)
 
@@ -271,7 +281,7 @@ class EMA:
             p.requires_grad_(False)
 
     def update(self, model):
-        if hasattr(model, 'module'):
+        if hasattr(model, "module"):
             model = model.module
         # Update EMA parameters
         with torch.no_grad():
@@ -301,13 +311,13 @@ class AverageMeter:
 class ComputeLoss:
     def __init__(self, model, params):
         super().__init__()
-        if hasattr(model, 'module'):
+        if hasattr(model, "module"):
             model = model.module
 
         device = next(model.parameters()).device  # get model device
 
         m = model.head  # Head() module
-        self.bce = torch.nn.BCEWithLogitsLoss(reduction='none')
+        self.bce = torch.nn.BCEWithLogitsLoss(reduction="none")
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
         self.no = m.no
@@ -366,9 +376,9 @@ class ComputeLoss:
 
         scores = pred_scores.detach().sigmoid()
         bboxes = (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype)
-        target_bboxes, target_scores, fg_mask = self.assign(scores, bboxes,
-                                                            gt_labels, gt_bboxes, mask_gt,
-                                                            anchor_points * stride_tensor)
+        target_bboxes, target_scores, fg_mask = self.assign(
+            scores, bboxes, gt_labels, gt_bboxes, mask_gt, anchor_points * stride_tensor
+        )
 
         target_bboxes /= stride_tensor
         target_scores_sum = target_scores.sum()
@@ -388,17 +398,23 @@ class ComputeLoss:
             # DFL loss
             a, b = torch.split(target_bboxes, 2, -1)
             target_lt_rb = torch.cat((anchor_points - a, b - anchor_points), -1)
-            target_lt_rb = target_lt_rb.clamp(0, self.dfl_ch - 1.01)  # distance (left_top, right_bottom)
-            loss_dfl = self.df_loss(pred_output[fg_mask].view(-1, self.dfl_ch), target_lt_rb[fg_mask])
+            target_lt_rb = target_lt_rb.clamp(
+                0, self.dfl_ch - 1.01
+            )  # distance (left_top, right_bottom)
+            loss_dfl = self.df_loss(
+                pred_output[fg_mask].view(-1, self.dfl_ch), target_lt_rb[fg_mask]
+            )
             loss_dfl = (loss_dfl * weight).sum() / target_scores_sum
 
-        loss_cls *= self.params['cls']
-        loss_box *= self.params['box']
-        loss_dfl *= self.params['dfl']
+        loss_cls *= self.params["cls"]
+        loss_box *= self.params["box"]
+        loss_dfl *= self.params["dfl"]
         return loss_cls + loss_box + loss_dfl  # loss(cls, box, dfl)
 
     @torch.no_grad()
-    def assign(self, pred_scores, pred_bboxes, true_labels, true_bboxes, true_mask, anchors):
+    def assign(
+        self, pred_scores, pred_bboxes, true_labels, true_bboxes, true_mask, anchors
+    ):
         """
         Task-aligned One-stage Object Detection assigner
         """
@@ -407,11 +423,13 @@ class ComputeLoss:
 
         if self.num_max_boxes == 0:
             device = true_bboxes.device
-            return (torch.full_like(pred_scores[..., 0], self.nc).to(device),
-                    torch.zeros_like(pred_bboxes).to(device),
-                    torch.zeros_like(pred_scores).to(device),
-                    torch.zeros_like(pred_scores[..., 0]).to(device),
-                    torch.zeros_like(pred_scores[..., 0]).to(device))
+            return (
+                torch.full_like(pred_scores[..., 0], self.nc).to(device),
+                torch.zeros_like(pred_bboxes).to(device),
+                torch.zeros_like(pred_scores).to(device),
+                torch.zeros_like(pred_scores[..., 0]).to(device),
+                torch.zeros_like(pred_scores[..., 0]).to(device),
+            )
 
         i = torch.zeros([2, self.bs, self.num_max_boxes], dtype=torch.long)
         i[0] = torch.arange(end=self.bs).view(-1, 1).repeat(1, self.num_max_boxes)
@@ -419,17 +437,25 @@ class ComputeLoss:
 
         overlaps = self.iou(true_bboxes.unsqueeze(2), pred_bboxes.unsqueeze(1))
         overlaps = overlaps.squeeze(3).clamp(0)
-        align_metric = pred_scores[i[0], :, i[1]].pow(self.alpha) * overlaps.pow(self.beta)
+        align_metric = pred_scores[i[0], :, i[1]].pow(self.alpha) * overlaps.pow(
+            self.beta
+        )
         bs, n_boxes, _ = true_bboxes.shape
         lt, rb = true_bboxes.view(-1, 1, 4).chunk(2, 2)  # left-top, right-bottom
         bbox_deltas = torch.cat((anchors[None] - lt, rb - anchors[None]), dim=2)
-        mask_in_gts = bbox_deltas.view(bs, n_boxes, anchors.shape[0], -1).amin(3).gt_(1e-9)
+        mask_in_gts = (
+            bbox_deltas.view(bs, n_boxes, anchors.shape[0], -1).amin(3).gt_(1e-9)
+        )
         metrics = align_metric * mask_in_gts
         top_k_mask = true_mask.repeat([1, 1, self.top_k]).bool()
         num_anchors = metrics.shape[-1]
-        top_k_metrics, top_k_indices = torch.topk(metrics, self.top_k, dim=-1, largest=True)
+        top_k_metrics, top_k_indices = torch.topk(
+            metrics, self.top_k, dim=-1, largest=True
+        )
         if top_k_mask is None:
-            top_k_mask = (top_k_metrics.max(-1, keepdim=True) > self.eps).tile([1, 1, self.top_k])
+            top_k_mask = (top_k_metrics.max(-1, keepdim=True) > self.eps).tile(
+                [1, 1, self.top_k]
+            )
         top_k_indices = torch.where(top_k_mask, top_k_indices, 0)
         is_in_top_k = one_hot(top_k_indices, num_anchors).sum(-2)
         # filter invalid boxes
@@ -440,7 +466,9 @@ class ComputeLoss:
 
         fg_mask = mask_pos.sum(-2)
         if fg_mask.max() > 1:  # one anchor is assigned to multiple gt_bboxes
-            mask_multi_gts = (fg_mask.unsqueeze(1) > 1).repeat([1, self.num_max_boxes, 1])
+            mask_multi_gts = (fg_mask.unsqueeze(1) > 1).repeat(
+                [1, self.num_max_boxes, 1]
+            )
             max_overlaps_idx = overlaps.argmax(1)
             is_max_overlaps = one_hot(max_overlaps_idx, self.num_max_boxes)
             is_max_overlaps = is_max_overlaps.permute(0, 2, 1).to(overlaps.dtype)
@@ -450,9 +478,9 @@ class ComputeLoss:
         target_gt_idx = mask_pos.argmax(-2)  # (b, h*w)
 
         # assigned target labels, (b, 1)
-        batch_index = torch.arange(end=self.bs,
-                                   dtype=torch.int64,
-                                   device=true_labels.device)[..., None]
+        batch_index = torch.arange(
+            end=self.bs, dtype=torch.int64, device=true_labels.device
+        )[..., None]
         target_gt_idx = target_gt_idx + batch_index * self.num_max_boxes
         target_labels = true_labels.long().flatten()[target_gt_idx]
 
@@ -469,7 +497,9 @@ class ComputeLoss:
         align_metric *= mask_pos
         pos_align_metrics = align_metric.amax(axis=-1, keepdim=True)
         pos_overlaps = (overlaps * mask_pos).amax(axis=-1, keepdim=True)
-        norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2)
+        norm_align_metric = (
+            align_metric * pos_overlaps / (pos_align_metrics + self.eps)
+        ).amax(-2)
         norm_align_metric = norm_align_metric.unsqueeze(-1)
         target_scores = target_scores * norm_align_metric
 
@@ -510,11 +540,13 @@ class ComputeLoss:
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
         # Complete IoU https://arxiv.org/abs/1911.08287v1
-        c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
+        c2 = cw**2 + ch**2 + eps  # convex diagonal squared
         # center dist ** 2
-        rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4
+        rho2 = (
+            (b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2
+        ) / 4
         # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
-        v = (4 / math.pi ** 2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow(2)
+        v = (4 / math.pi**2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow(2)
         with torch.no_grad():
             alpha = v / (v - iou + (1 + eps))
         return iou - (rho2 / c2 + v * alpha)  # CIoU
