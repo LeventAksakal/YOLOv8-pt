@@ -243,6 +243,7 @@ def test(args, params, model=None):
     map50 = 0.0
     mean_ap = 0.0
     metrics = []
+
     p_bar = tqdm.tqdm(loader, desc=("%10s" * 3) % ("precision", "recall", "mAP"))
     for i, (samples, targets, shapes) in enumerate(p_bar):
         samples = samples.cuda()
@@ -259,58 +260,11 @@ def test(args, params, model=None):
         ).cuda()  # to pixels
         outputs = util.non_max_suppression(outputs, 0.001, 0.65)
 
-        # Draw bounding boxes and save images
-        for j, output in enumerate(outputs):
-            image = samples[j].cpu().numpy().transpose(1, 2, 0) * 255
-            image = cv2.cvtColor(image.astype(numpy.uint8), cv2.COLOR_RGB2BGR)
+        # Save predictions on the validation set as csv
+        # save_predictions(outputs, shapes, (640, 640))
 
-            if output is not None and len(output):
-                for *box, conf, cls in output:
-                    x1, y1, x2, y2 = map(int, box)
-                    label = f"{cls:.0f} {conf:.2f}"
-                    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(
-                        image,
-                        label,
-                        (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (0, 255, 0),
-                        2,
-                    )
-
-            # Save image
-            output_directory = "output_images"
-            if not os.path.exists(output_directory):
-                os.makedirs(output_directory)
-
-            output_path = os.path.join(output_directory, f"image_{i}_{j}.jpg")
-            cv2.imwrite(output_path, image)
-
-        with open("test_predictions.csv", "w", newline="") as csvfile:
-            fieldnames = ["filename", "conf", "cls", "x", "y", "w", "h"]
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            for i, output in enumerate(outputs):
-                if output is not None:
-                    for *box, conf, cls in output:
-                        # Convert xyxy to xywh
-                        x1, y1, x2, y2 = box
-                        x = (x1 + x2) / 2 / width
-                        y = (y1 + y2) / 2 / height
-                        w = (x2 - x1) / width
-                        h = (y2 - y1) / height
-                        writer.writerow(
-                            {
-                                "filename": filenames[i],
-                                "conf": conf.item(),
-                                "cls": int(cls.item()),
-                                "x": x.item(),
-                                "y": y.item(),
-                                "w": w.item(),
-                                "h": h.item(),
-                            }
-                        )
+        # Save images with predictions on the validation set
+        # save_images(samples, outputs)
 
         # Metrics
         for i, output in enumerate(outputs):
@@ -372,6 +326,76 @@ def test(args, params, model=None):
     # Return results
     model.float()  # for training
     return map50, mean_ap
+
+
+def reverse_transform(image, shapes):
+
+    original_shape, transform_info = shapes
+    scale, pad = transform_info
+
+    image
+
+
+def save_predictions(predictions, shapes_list, output_size, output_path="."):
+    with open(
+        os.path.join(output_path, "test_predictions.csv"), "w", newline=""
+    ) as csvfile:
+        fieldnames = ["image_index", "conf", "cls", "x", "y", "w", "h"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for i, (output, shapes) in enumerate(zip(predictions, shapes_list)):
+            print(f"Processing prediction {i + 1}/{len(predictions)}")
+            if output is not None:
+                boxes = output[:, :4].cpu().numpy()
+                reversed_boxes = reverse_transform(boxes, shapes, output_size)
+                for j, box in enumerate(reversed_boxes):
+                    x1, y1, x2, y2 = box
+                    x = (x1 + x2) / 2
+                    y = (y1 + y2) / 2
+                    w = x2 - x1
+                    h = y2 - y1
+                    conf = output[j, 4].item()
+                    cls = int(output[j, 5].item())
+                    writer.writerow(
+                        {
+                            "image_index": f"{i}",
+                            "conf": conf,
+                            "cls": cls,
+                            "x": x,
+                            "y": y,
+                            "w": w,
+                            "h": h,
+                        }
+                    )
+
+
+def save_images(images, predictions, output_path="."):
+    for i, output in enumerate(predictions):
+        image = images[i].cpu().numpy().transpose(1, 2, 0) * 255
+        image = cv2.cvtColor(image.astype(numpy.uint8), cv2.COLOR_RGB2BGR)
+
+        if output is not None and len(output):
+            for *box, conf, cls in output:
+                x1, y1, x2, y2 = map(int, box)
+                label = f"{cls:.0f} {conf:.2f}"
+                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(
+                    image,
+                    label,
+                    (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    2,
+                )
+
+        # Save image
+        output_directory = "output_images"
+        if not os.path.exists(output_directory):
+            os.makedirs(output_directory)
+
+        output_path = os.path.join(output_directory, f"image_{i}.jpg")
+        cv2.imwrite(output_path, image)
 
 
 def main():
