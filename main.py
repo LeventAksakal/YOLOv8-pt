@@ -14,7 +14,7 @@ from torch.utils import data
 
 from nets import nn
 from utils import util
-from utils.dataset import Dataset
+from utils.dataset import Dataset, wh2xy
 
 warnings.filterwarnings("ignore")
 
@@ -264,7 +264,7 @@ def test(args, params, model=None):
         # save_predictions(outputs, shapes, (640, 640))
 
         # Save images with predictions on the validation set
-        # save_images(samples, outputs)
+        save_images(samples, outputs, batch_iter=i)
 
         # Metrics
         for i, output in enumerate(outputs):
@@ -369,32 +369,63 @@ def save_predictions(predictions, shapes_list, output_size, output_path="."):
                     )
 
 
-def save_images(images, predictions, output_path="."):
+def save_images(images, predictions, output_path=".", batch_iter=0):
+    # Define color for each class
+    class_colors = {
+        0: (0, 255, 0),  # Green for football
+        1: (255, 0, 0),  # Blue for player
+        2: (0, 0, 255),  # Red for referee
+    }
+    class_names = {0: "football", 1: "player", 2: "referee"}
+
     for i, output in enumerate(predictions):
         image = images[i].cpu().numpy().transpose(1, 2, 0) * 255
         image = cv2.cvtColor(image.astype(numpy.uint8), cv2.COLOR_RGB2BGR)
 
         if output is not None and len(output):
             for *box, conf, cls in output:
-                x1, y1, x2, y2 = map(int, box)
-                label = f"{cls:.0f} {conf:.2f}"
-                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                x1, y1, x2, y2 = [int(i.item()) for i in box]
+
+                label = f"{conf:.2f}"
+
+                color = class_colors[int(cls.item())]  # Get color for the class
+
+                cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(
                     image,
                     label,
                     (x1, y1 - 10),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
-                    (0, 255, 0),
+                    color,
                     2,
                 )
+
+        # Draw class color coding
+        for cls, color in class_colors.items():
+            cv2.rectangle(
+                image,
+                (10, image.shape[0] - (cls + 1) * 40),
+                (110, image.shape[0] - cls * 40),
+                color,
+                -1,
+            )
+            cv2.putText(
+                image,
+                f"{class_names[cls]}",
+                (20, image.shape[0] - cls * 40 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (255, 255, 255),
+                2,
+            )
 
         # Save image
         output_directory = "output_images"
         if not os.path.exists(output_directory):
             os.makedirs(output_directory)
 
-        output_path = os.path.join(output_directory, f"image_{i}.jpg")
+        output_path = os.path.join(output_directory, f"image_{batch_iter}_{i}.jpg")
         cv2.imwrite(output_path, image)
 
 

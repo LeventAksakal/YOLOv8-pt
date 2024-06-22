@@ -17,7 +17,7 @@ from torch.utils import data
 
 from nets import nn
 from utils import util
-from utils.dataset import Dataset
+from utils.dataset import Dataset, wh2xy
 
 warnings.filterwarnings("ignore")
 
@@ -246,6 +246,7 @@ def test(args, params, model=None):
     map50 = 0.0
     mean_ap = 0.0
     metrics = []
+
     p_bar = tqdm.tqdm(loader, desc=("%10s" * 3) % ("precision", "recall", "mAP"))
     for i, (samples, targets, shapes) in enumerate(p_bar):
         samples = samples.cuda()
@@ -263,10 +264,10 @@ def test(args, params, model=None):
         outputs = util.non_max_suppression(outputs, 0.001, 0.65)
 
         # Save predictions on the validation set as csv
-        save_predictions(outputs)
+        # save_predictions(outputs, shapes, (640, 640))
 
         # Save images with predictions on the validation set
-        save_images(samples, outputs)
+        # save_images(samples, outputs)
 
         # Metrics
         for i, output in enumerate(outputs):
@@ -330,34 +331,45 @@ def test(args, params, model=None):
     return map50, mean_ap
 
 
-def save_predictions(predictions, output_path="."):
+def reverse_transform(image, shapes):
+
+    original_shape, transform_info = shapes
+    scale, pad = transform_info
+
+    image
+
+
+def save_predictions(predictions, shapes_list, output_size, output_path="."):
     with open(
         os.path.join(output_path, "test_predictions.csv"), "w", newline=""
     ) as csvfile:
         fieldnames = ["image_index", "conf", "cls", "x", "y", "w", "h"]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        for i, output in enumerate(predictions):
-            print(i)
-            # if output is not None:
-            #     for *box, conf, cls in output:
-            #         # Convert xyxy to xywh
-            #         x1, y1, x2, y2 = box
-            #         x = (x1 + x2) / 2 / width
-            #         y = (y1 + y2) / 2 / height
-            #         w = (x2 - x1) / width
-            #         h = (y2 - y1) / height
-            #         writer.writerow(
-            #             {
-            #                 "image_index": f"{i}",
-            #                 "conf": conf.item(),
-            #                 "cls": int(cls.item()),
-            #                 "x": x.item(),
-            #                 "y": y.item(),
-            #                 "w": w.item(),
-            #                 "h": h.item(),
-            #             }
-            #         )
+        for i, (output, shapes) in enumerate(zip(predictions, shapes_list)):
+            print(f"Processing prediction {i + 1}/{len(predictions)}")
+            if output is not None:
+                boxes = output[:, :4].cpu().numpy()
+                reversed_boxes = reverse_transform(boxes, shapes, output_size)
+                for j, box in enumerate(reversed_boxes):
+                    x1, y1, x2, y2 = box
+                    x = (x1 + x2) / 2
+                    y = (y1 + y2) / 2
+                    w = x2 - x1
+                    h = y2 - y1
+                    conf = output[j, 4].item()
+                    cls = int(output[j, 5].item())
+                    writer.writerow(
+                        {
+                            "image_index": f"{i}",
+                            "conf": conf,
+                            "cls": cls,
+                            "x": x,
+                            "y": y,
+                            "w": w,
+                            "h": h,
+                        }
+                    )
 
 
 def save_images(images, predictions, output_path="."):
@@ -367,8 +379,9 @@ def save_images(images, predictions, output_path="."):
 
         if output is not None and len(output):
             for *box, conf, cls in output:
-                x1, y1, x2, y2 = map(int, box)
+                x1, y1, x2, y2 = wh2xy(box)
                 label = f"{cls:.0f} {conf:.2f}"
+
                 cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(
                     image,

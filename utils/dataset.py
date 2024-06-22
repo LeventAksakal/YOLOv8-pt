@@ -481,7 +481,7 @@ class Albumentations:
     def __init__(self):
         self.transform = None
         try:
-            import albumentations as album
+            import albumentations as album # type: ignore
 
             transforms = [
                 album.Blur(p=0.01),
