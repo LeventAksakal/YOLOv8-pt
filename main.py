@@ -14,9 +14,7 @@ from torch.utils import data
 
 from nets import nn
 from utils import util
-from utils.dataset import Dataset, wh2xy
-
-warnings.filterwarnings("ignore")
+from utils.dataset import Dataset
 
 
 def learning_rate(args, params):
@@ -220,10 +218,6 @@ def test(args, params, model=None):
         if os.path.isfile(os.path.join(directory, f))
     ]
     dataset = Dataset(filenames, args.input_size, params, False)
-    # plot image
-    # image = dataset[0][0].permute(1, 2, 0).cpu().numpy()
-    # plt.imshow(image)
-    # plt.show()
 
     loader = data.DataLoader(
         dataset, 8, False, num_workers=8, pin_memory=True, collate_fn=Dataset.collate_fn
@@ -258,10 +252,10 @@ def test(args, params, model=None):
         targets[:, 2:] *= torch.tensor(
             (width, height, width, height)
         ).cuda()  # to pixels
-        outputs = util.non_max_suppression(outputs, 0.001, 0.65)
+        outputs = util.non_max_suppression(outputs, 0.1, 0.65)
 
         # Save predictions on the validation set as csv
-        # save_predictions(outputs, shapes, (640, 640))
+        save_predictions(outputs, batch_iter=i)
 
         # Save images with predictions on the validation set
         save_images(samples, outputs, batch_iter=i)
@@ -328,55 +322,53 @@ def test(args, params, model=None):
     return map50, mean_ap
 
 
-def reverse_transform(image, shapes):
+def save_predictions(predictions, output_path=".", batch_iter=0):
+    mode = "a" if batch_iter != 0 else "w"
+    header = batch_iter == 0
 
-    original_shape, transform_info = shapes
-    scale, pad = transform_info
-
-    image
-
-
-def save_predictions(predictions, shapes_list, output_size, output_path="."):
     with open(
-        os.path.join(output_path, "test_predictions.csv"), "w", newline=""
+        os.path.join(output_path, "test_predictions.csv"), mode, newline=""
     ) as csvfile:
-        fieldnames = ["image_index", "conf", "cls", "x", "y", "w", "h"]
+        fieldnames = ["image_index", "conf", "cls", "x1", "y1", "x2", "y2"]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        for i, (output, shapes) in enumerate(zip(predictions, shapes_list)):
-            print(f"Processing prediction {i + 1}/{len(predictions)}")
-            if output is not None:
-                boxes = output[:, :4].cpu().numpy()
-                reversed_boxes = reverse_transform(boxes, shapes, output_size)
-                for j, box in enumerate(reversed_boxes):
-                    x1, y1, x2, y2 = box
-                    x = (x1 + x2) / 2
-                    y = (y1 + y2) / 2
-                    w = x2 - x1
-                    h = y2 - y1
-                    conf = output[j, 4].item()
-                    cls = int(output[j, 5].item())
+
+        if header:
+            writer.writeheader()
+
+        for i, output in enumerate(predictions):
+            if output is not None and len(output):
+                for *box, conf, cls in output:
+                    x1, y1, x2, y2 = [int(i.item()) for i in box]
                     writer.writerow(
                         {
-                            "image_index": f"{i}",
-                            "conf": conf,
-                            "cls": cls,
-                            "x": x,
-                            "y": y,
-                            "w": w,
-                            "h": h,
+                            "image_index": f"{batch_iter}_{i}",
+                            "conf": conf.item(),
+                            "cls": cls.item(),
+                            "x1": x1,
+                            "y1": y1,
+                            "x2": x2,
+                            "y2": y2,
                         }
                     )
 
 
+def read_classes_and_colors(yaml_path):
+    with open(yaml_path, "r") as file:
+        args = yaml.safe_load(file)
+        classes = args["names"]
+    class_names = {int(k): v for k, v in classes.items()}
+    class_colors = {k: generate_unique_color(v) for k, v in class_names.items()}
+    return class_names, class_colors
+
+
+def generate_unique_color(text, hash_func=numpy.sum):
+    seed = hash_func([ord(c) for c in text]) % 256
+    numpy.random.seed(seed)
+    return tuple(numpy.random.randint(0, 255, 3).tolist())
+
+
 def save_images(images, predictions, output_path=".", batch_iter=0):
-    # Define color for each class
-    class_colors = {
-        0: (0, 255, 0),  # Green for football
-        1: (255, 0, 0),  # Blue for player
-        2: (0, 0, 255),  # Red for referee
-    }
-    class_names = {0: "football", 1: "player", 2: "referee"}
+    class_names, class_colors = read_classes_and_colors("./utils/args.yaml")
 
     for i, output in enumerate(predictions):
         image = images[i].cpu().numpy().transpose(1, 2, 0) * 255
@@ -385,48 +377,221 @@ def save_images(images, predictions, output_path=".", batch_iter=0):
         if output is not None and len(output):
             for *box, conf, cls in output:
                 x1, y1, x2, y2 = [int(i.item()) for i in box]
-
-                label = f"{conf:.2f}"
-
-                color = class_colors[int(cls.item())]  # Get color for the class
-
+                label = f"{class_names[int(cls.item())]} {conf:.4f}"
+                color = class_colors[int(cls.item())]
                 cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(
+                    image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2
+                )
+                cv2.putText(
                     image,
-                    label,
-                    (x1, y1 - 10),
+                    class_names[int(cls.item())],
+                    (x1, y1 + 10),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
                     color,
-                    2,
+                    1,
                 )
 
-        # Draw class color coding
-        for cls, color in class_colors.items():
-            cv2.rectangle(
-                image,
-                (10, image.shape[0] - (cls + 1) * 40),
-                (110, image.shape[0] - cls * 40),
-                color,
-                -1,
-            )
-            cv2.putText(
-                image,
-                f"{class_names[cls]}",
-                (20, image.shape[0] - cls * 40 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (255, 255, 255),
-                2,
-            )
-
         # Save image
-        output_directory = "output_images"
+        output_directory = os.path.join(output_path, "output_images")
         if not os.path.exists(output_directory):
             os.makedirs(output_directory)
+        output_file_path = os.path.join(output_directory, f"image_{batch_iter}_{i}.jpg")
+        cv2.imwrite(output_file_path, image)
 
-        output_path = os.path.join(output_directory, f"image_{batch_iter}_{i}.jpg")
-        cv2.imwrite(output_path, image)
+
+def finetune(args, params, model_path="weights/finetune.pt", num_classes=3):
+    # Load the base model
+    checkpoint = torch.load(model_path, map_location=torch.device("cpu"))
+    model = checkpoint["model"]
+
+    # Hardcoded for yolov8-n
+    width = [3, 16, 32, 64, 128, 256]
+    img_dummy = torch.zeros(1, 3, 256, 256)
+
+    # Modify the final layer to output `num_classes` classes
+    model.head = nn.Head(num_classes, (width[3], width[4], width[5]))
+    model = model.cuda()
+    # model.head.stride = torch.tensor(
+    #     [256 / x.shape[-2] for x in model.forward(img_dummy)]
+    # )
+    # model.stride = model.head.stride
+    # model.head.initialize_biases()
+
+    # Optimizer
+    accumulate = max(round(64 / (args.batch_size * args.world_size)), 1)
+    params["weight_decay"] *= args.batch_size * args.world_size * accumulate / 64
+
+    p = [], [], []
+    for v in model.modules():
+        if hasattr(v, "bias") and isinstance(v.bias, torch.nn.Parameter):
+            p[2].append(v.bias)
+        if isinstance(v, torch.nn.BatchNorm2d):
+            p[1].append(v.weight)
+        elif hasattr(v, "weight") and isinstance(v.weight, torch.nn.Parameter):
+            p[0].append(v.weight)
+
+    optimizer = torch.optim.SGD(p[2], params["lr0"], params["momentum"], nesterov=True)
+
+    optimizer.add_param_group({"params": p[0], "weight_decay": params["weight_decay"]})
+    optimizer.add_param_group({"params": p[1]})
+    del p
+
+    # Scheduler
+    lr = learning_rate(args, params)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr, last_epoch=-1)
+
+    # EMA
+    ema = util.EMA(model) if args.local_rank == 0 else None
+
+    directory = "dataset\\images\\train"
+    filenames = [
+        os.path.join(directory, f)
+        for f in os.listdir(directory)
+        if os.path.isfile(os.path.join(directory, f))
+    ]
+
+    dataset = Dataset(filenames, args.input_size, params, True)
+
+    if args.world_size <= 1:
+        sampler = None
+    else:
+        sampler = data.distributed.DistributedSampler(dataset)
+
+    loader = data.DataLoader(
+        dataset,
+        args.batch_size,
+        sampler is None,
+        sampler,
+        num_workers=8,
+        pin_memory=True,
+        collate_fn=Dataset.collate_fn,
+    )
+
+    if args.world_size > 1:
+        # DDP mode
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        model = torch.nn.parallel.DistributedDataParallel(
+            module=model, device_ids=[args.local_rank], output_device=args.local_rank
+        )
+
+    # Start training
+    best = 0
+    num_batch = len(loader)
+    amp_scale = torch.cuda.amp.GradScaler()
+    criterion = util.ComputeLoss(model, params)
+    num_warmup = max(round(params["warmup_epochs"] * num_batch), 1000)
+    with open("weights/step.csv", "w") as f:
+        if args.local_rank == 0:
+            writer = csv.DictWriter(f, fieldnames=["epoch", "mAP@50", "mAP"])
+            writer.writeheader()
+        for epoch in range(args.epochs):
+            model.train()
+
+            if args.epochs - epoch == 10:
+                loader.dataset.mosaic = False
+
+            m_loss = util.AverageMeter()
+            if args.world_size > 1:
+                sampler.set_epoch(epoch)
+            p_bar = enumerate(loader)
+            if args.local_rank == 0:
+                print(("\n" + "%10s" * 3) % ("epoch", "memory", "loss"))
+            if args.local_rank == 0:
+                p_bar = tqdm.tqdm(p_bar, total=num_batch)  # progress bar
+
+            optimizer.zero_grad()
+
+            for i, (samples, targets, _) in p_bar:
+                x = i + num_batch * epoch  # number of iterations
+                samples = samples.cuda().float() / 255
+                targets = targets.cuda()
+
+                # Warmup
+                if x <= num_warmup:
+                    xp = [0, num_warmup]
+                    fp = [1, 64 / (args.batch_size * args.world_size)]
+                    accumulate = max(1, numpy.interp(x, xp, fp).round())
+                    for j, y in enumerate(optimizer.param_groups):
+                        if j == 0:
+                            fp = [params["warmup_bias_lr"], y["initial_lr"] * lr(epoch)]
+                        else:
+                            fp = [0.0, y["initial_lr"] * lr(epoch)]
+                        y["lr"] = numpy.interp(x, xp, fp)
+                        if "momentum" in y:
+                            fp = [params["warmup_momentum"], params["momentum"]]
+                            y["momentum"] = numpy.interp(x, xp, fp)
+
+                # Forward
+                with torch.cuda.amp.autocast():
+                    outputs = model(samples)  # forward
+                loss = criterion(outputs, targets)
+
+                m_loss.update(loss.item(), samples.size(0))
+
+                loss *= args.batch_size  # loss scaled by batch_size
+                loss *= args.world_size  # gradient averaged between devices in DDP mode
+
+                # Backward
+                amp_scale.scale(loss).backward()
+
+                # Optimize
+                if x % accumulate == 0:
+                    amp_scale.unscale_(optimizer)  # unscale gradients
+                    util.clip_gradients(model)  # clip gradients
+                    amp_scale.step(optimizer)  # optimizer.step
+                    amp_scale.update()
+                    optimizer.zero_grad()
+                    if ema:
+                        ema.update(model)
+
+                # Log
+                if args.local_rank == 0:
+                    memory = f"{torch.cuda.memory_reserved() / 1E9:.3g}G"  # (GB)
+                    s = ("%10s" * 2 + "%10.4g") % (
+                        f"{epoch + 1}/{args.epochs}",
+                        memory,
+                        m_loss.avg,
+                    )
+                    p_bar.set_description(s)
+
+                del loss
+                del outputs
+
+            # Scheduler
+            scheduler.step()
+
+            if args.local_rank == 0:
+                # mAP
+                last = test(args, params, ema.ema)
+                writer.writerow(
+                    {
+                        "mAP": str(f"{last[1]:.3f}"),
+                        "epoch": str(epoch + 1).zfill(3),
+                        "mAP@50": str(f"{last[0]:.3f}"),
+                    }
+                )
+                f.flush()
+
+                # Update best mAP
+                if last[1] > best:
+                    best = last[1]
+
+                # Save model
+                ckpt = {"model": copy.deepcopy(ema.ema).half()}
+
+                # Save last, best and delete
+                torch.save(ckpt, "./weights/ft_last.pt")
+                if best == last[1]:
+                    torch.save(ckpt, "./weights/ft_best.pt")
+                del ckpt
+
+    if args.local_rank == 0:
+        util.strip_optimizer("./weights/ft_best.pt")  # strip optimizers
+        util.strip_optimizer("./weights/ft_last.pt")  # strip optimizers
+
+    torch.cuda.empty_cache()
 
 
 def main():
@@ -434,9 +599,13 @@ def main():
     parser.add_argument("--input-size", default=640, type=int)
     parser.add_argument("--batch-size", default=32, type=int)
     parser.add_argument("--local_rank", default=0, type=int)
-    parser.add_argument("--epochs", default=30, type=int)
+    parser.add_argument("--epochs", default=200, type=int)
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--test", action="store_true")
+    parser.add_argument(
+        "--finetune",
+        action="store_true",
+    )
 
     args = parser.parse_args()
 
@@ -461,6 +630,8 @@ def main():
         train(args, params)
     if args.test:
         test(args, params)
+    if args.finetune:
+        finetune(args, params)
 
 
 if __name__ == "__main__":

@@ -14,20 +14,32 @@ def pad(k, p=None, d=1):
 
 
 def fuse_conv(conv, norm):
-    fused_conv = torch.nn.Conv2d(conv.in_channels,
-                                 conv.out_channels,
-                                 kernel_size=conv.kernel_size,
-                                 stride=conv.stride,
-                                 padding=conv.padding,
-                                 groups=conv.groups,
-                                 bias=True).requires_grad_(False).to(conv.weight.device)
+    fused_conv = (
+        torch.nn.Conv2d(
+            conv.in_channels,
+            conv.out_channels,
+            kernel_size=conv.kernel_size,
+            stride=conv.stride,
+            padding=conv.padding,
+            groups=conv.groups,
+            bias=True,
+        )
+        .requires_grad_(False)
+        .to(conv.weight.device)
+    )
 
     w_conv = conv.weight.clone().view(conv.out_channels, -1)
     w_norm = torch.diag(norm.weight.div(torch.sqrt(norm.eps + norm.running_var)))
     fused_conv.weight.copy_(torch.mm(w_norm, w_conv).view(fused_conv.weight.size()))
 
-    b_conv = torch.zeros(conv.weight.size(0), device=conv.weight.device) if conv.bias is None else conv.bias
-    b_norm = norm.bias - norm.weight.mul(norm.running_mean).div(torch.sqrt(norm.running_var + norm.eps))
+    b_conv = (
+        torch.zeros(conv.weight.size(0), device=conv.weight.device)
+        if conv.bias is None
+        else conv.bias
+    )
+    b_norm = norm.bias - norm.weight.mul(norm.running_mean).div(
+        torch.sqrt(norm.running_var + norm.eps)
+    )
     fused_conv.bias.copy_(torch.mm(w_norm, b_conv.reshape(-1, 1)).reshape(-1) + b_norm)
 
     return fused_conv
@@ -51,8 +63,7 @@ class Residual(torch.nn.Module):
     def __init__(self, ch, add=True):
         super().__init__()
         self.add_m = add
-        self.res_m = torch.nn.Sequential(Conv(ch, ch, 3),
-                                         Conv(ch, ch, 3))
+        self.res_m = torch.nn.Sequential(Conv(ch, ch, 3), Conv(ch, ch, 3))
 
     def forward(self, x):
         return self.res_m(x) + x if self.add_m else self.res_m(x)
@@ -90,15 +101,14 @@ class DarkNet(torch.nn.Module):
     def __init__(self, width, depth):
         super().__init__()
         p1 = [Conv(width[0], width[1], 3, 2)]
-        p2 = [Conv(width[1], width[2], 3, 2),
-              CSP(width[2], width[2], depth[0])]
-        p3 = [Conv(width[2], width[3], 3, 2),
-              CSP(width[3], width[3], depth[1])]
-        p4 = [Conv(width[3], width[4], 3, 2),
-              CSP(width[4], width[4], depth[2])]
-        p5 = [Conv(width[4], width[5], 3, 2),
-              CSP(width[5], width[5], depth[0]),
-              SPP(width[5], width[5])]
+        p2 = [Conv(width[1], width[2], 3, 2), CSP(width[2], width[2], depth[0])]
+        p3 = [Conv(width[2], width[3], 3, 2), CSP(width[3], width[3], depth[1])]
+        p4 = [Conv(width[3], width[4], 3, 2), CSP(width[4], width[4], depth[2])]
+        p5 = [
+            Conv(width[4], width[5], 3, 2),
+            CSP(width[5], width[5], depth[0]),
+            SPP(width[5], width[5]),
+        ]
 
         self.p1 = torch.nn.Sequential(*p1)
         self.p2 = torch.nn.Sequential(*p2)
@@ -167,19 +177,27 @@ class Head(torch.nn.Module):
         c2 = max((filters[0] // 4, self.ch * 4))
 
         self.dfl = DFL(self.ch)
-        self.cls = torch.nn.ModuleList(torch.nn.Sequential(Conv(x, c1, 3),
-                                                           Conv(c1, c1, 3),
-                                                           torch.nn.Conv2d(c1, self.nc, 1)) for x in filters)
-        self.box = torch.nn.ModuleList(torch.nn.Sequential(Conv(x, c2, 3),
-                                                           Conv(c2, c2, 3),
-                                                           torch.nn.Conv2d(c2, 4 * self.ch, 1)) for x in filters)
+        self.cls = torch.nn.ModuleList(
+            torch.nn.Sequential(
+                Conv(x, c1, 3), Conv(c1, c1, 3), torch.nn.Conv2d(c1, self.nc, 1)
+            )
+            for x in filters
+        )
+        self.box = torch.nn.ModuleList(
+            torch.nn.Sequential(
+                Conv(x, c2, 3), Conv(c2, c2, 3), torch.nn.Conv2d(c2, 4 * self.ch, 1)
+            )
+            for x in filters
+        )
 
     def forward(self, x):
         for i in range(self.nl):
             x[i] = torch.cat((self.box[i](x[i]), self.cls[i](x[i])), 1)
         if self.training:
             return x
-        self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+        self.anchors, self.strides = (
+            x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5)
+        )
 
         x = torch.cat([i.view(x[0].shape[0], self.no, -1) for i in x], 2)
         box, cls = x.split((self.ch * 4, self.nc), 1)
@@ -196,7 +214,7 @@ class Head(torch.nn.Module):
         for a, b, s in zip(m.box, m.cls, m.stride):
             a[-1].bias.data[:] = 1.0  # box
             # cls (.01 objects, 80 classes, 640 img)
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)
 
 
 class YOLO(torch.nn.Module):
@@ -204,10 +222,13 @@ class YOLO(torch.nn.Module):
         super().__init__()
         self.net = DarkNet(width, depth)
         self.fpn = DarkFPN(width, depth)
+        self.width = width
 
         img_dummy = torch.zeros(1, 3, 256, 256)
         self.head = Head(num_classes, (width[3], width[4], width[5]))
-        self.head.stride = torch.tensor([256 / x.shape[-2] for x in self.forward(img_dummy)])
+        self.head.stride = torch.tensor(
+            [256 / x.shape[-2] for x in self.forward(img_dummy)]
+        )
         self.stride = self.head.stride
         self.head.initialize_biases()
 
@@ -218,10 +239,10 @@ class YOLO(torch.nn.Module):
 
     def fuse(self):
         for m in self.modules():
-            if type(m) is Conv and hasattr(m, 'norm'):
+            if type(m) is Conv and hasattr(m, "norm"):
                 m.conv = fuse_conv(m.conv, m.norm)
                 m.forward = m.fuse_forward
-                delattr(m, 'norm')
+                delattr(m, "norm")
         return self
 
 
