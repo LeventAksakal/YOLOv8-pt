@@ -322,7 +322,67 @@ def test(args, params, model=None):
     return map50, mean_ap
 
 
+def predict(args, params):
+    """
+    Predicts bounding boxes for objects in a single image using the YOLOv8 model.
+    Saves the image with the predicted bounding boxes to specified output path.
+
+    Args:
+        args (Namespace): Command-line arguments.
+        params (dict): Dictionary containing model parameters.
+
+    Returns:
+        List[torch.Tensor]: List of tensors representing the predicted bounding boxes.
+    """
+    directory = "dataset\\images\\test"
+    filenames = [
+        os.path.join(directory, f)
+        for f in os.listdir(directory)
+        if os.path.isfile(os.path.join(directory, f))
+    ]
+    dataset = Dataset(filenames, args.input_size, params, False)
+    loader = data.DataLoader(
+        dataset, 8, False, num_workers=8, pin_memory=True, collate_fn=Dataset.collate_fn
+    )
+    for _, (_, targets, _) in enumerate(loader):
+        for target in targets:
+            target[2] = (target[2] + 1) % 3
+    model = nn.yolo_v8_n(len(params["names"].values())).cuda()
+    model.load_state_dict(torch.load("./weights/best.pt")["model"].state_dict())
+    model.eval()
+    criterion = util.ComputeLoss(model, params)
+    for i, (samples, targets, shapes) in enumerate(loader):
+        samples = samples.cuda().float() / 255
+        targets = targets.cuda()
+        samples.requires_grad = True  # Make samples require gradients
+
+        # Create an optimizer for samples
+        optimizer = torch.optim.Adam([samples], lr=1)
+
+        # Adversarial attack loop (example: single step for simplicity)
+        model.zero_grad()
+        outputs = model(samples)
+        outputs = [o.view(o.shape[0], o.shape[1], -1) for o in outputs]
+
+        loss = criterion(outputs, targets)
+        loss.backward()  # Compute gradients with respect to samples
+        optimizer.step()  # Update samples based on gradients
+        outputs = model(samples)  # Add batch dimension
+        outputs = util.non_max_suppression(outputs, 0.1, 0.65)
+        save_images(samples, outputs, batch_iter=0, output_path="./adv_attck")
+
+    return outputs
+
+
 def save_predictions(predictions, output_path=".", batch_iter=0):
+    """
+    Save the predictions to a CSV file.
+
+    Args:
+        predictions (list): List of predictions.
+        output_path (str, optional): Output path for the CSV file. Defaults to ".".
+        batch_iter (int, optional): Batch iteration number. Defaults to 0.
+    """
     mode = "a" if batch_iter != 0 else "w"
     header = batch_iter == 0
 
@@ -353,6 +413,16 @@ def save_predictions(predictions, output_path=".", batch_iter=0):
 
 
 def read_classes_and_colors(yaml_path):
+    """
+    Reads the class names and colors from a YAML file.
+
+    Args:
+        yaml_path (str): The path to the YAML file.
+
+    Returns:
+        tuple: A tuple containing two dictionaries. The first dictionary maps class IDs to class names,
+               and the second dictionary maps class IDs to unique colors.
+    """
     with open(yaml_path, "r") as file:
         args = yaml.safe_load(file)
         classes = args["names"]
@@ -362,12 +432,32 @@ def read_classes_and_colors(yaml_path):
 
 
 def generate_unique_color(text, hash_func=numpy.sum):
+    """
+    Generates a unique color based on the given text.
+
+    Parameters:
+    text (str): The input text used to generate the color.
+    hash_func (function, optional): The hash function used to generate the seed. Defaults to numpy.sum.
+
+    Returns:
+    tuple: A tuple representing the RGB values of the generated color.
+
+    """
     seed = hash_func([ord(c) for c in text]) % 256
     numpy.random.seed(seed)
     return tuple(numpy.random.randint(0, 255, 3).tolist())
 
 
-def save_images(images, predictions, output_path=".", batch_iter=0):
+def save_images(images, predictions, output_path="./output_images", batch_iter=0):
+    """
+    Save images with bounding box predictions.
+
+    Args:
+        images (list): List of input images.
+        predictions (list): List of bounding box predictions.
+        output_path (str, optional): Output directory path to save the images. Defaults to "./output_images".
+        batch_iter (int, optional): Batch iteration number. Defaults to 0.
+    """
     class_names, class_colors = read_classes_and_colors("./utils/args.yaml")
 
     for i, output in enumerate(predictions):
@@ -393,205 +483,10 @@ def save_images(images, predictions, output_path=".", batch_iter=0):
                     1,
                 )
 
-        # Save image
-        output_directory = os.path.join(output_path, "output_images")
-        if not os.path.exists(output_directory):
-            os.makedirs(output_directory)
-        output_file_path = os.path.join(output_directory, f"image_{batch_iter}_{i}.jpg")
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+        output_file_path = os.path.join(output_path, f"image_{batch_iter}_{i}.jpg")
         cv2.imwrite(output_file_path, image)
-
-
-def finetune(args, params, model_path="weights/finetune.pt", num_classes=3):
-    # Load the base model
-    checkpoint = torch.load(model_path, map_location=torch.device("cpu"))
-    model = checkpoint["model"]
-
-    # Hardcoded for yolov8-n
-    width = [3, 16, 32, 64, 128, 256]
-    img_dummy = torch.zeros(1, 3, 256, 256)
-
-    # Modify the final layer to output `num_classes` classes
-    model.head = nn.Head(num_classes, (width[3], width[4], width[5]))
-    model = model.cuda()
-    # model.head.stride = torch.tensor(
-    #     [256 / x.shape[-2] for x in model.forward(img_dummy)]
-    # )
-    # model.stride = model.head.stride
-    # model.head.initialize_biases()
-
-    # Optimizer
-    accumulate = max(round(64 / (args.batch_size * args.world_size)), 1)
-    params["weight_decay"] *= args.batch_size * args.world_size * accumulate / 64
-
-    p = [], [], []
-    for v in model.modules():
-        if hasattr(v, "bias") and isinstance(v.bias, torch.nn.Parameter):
-            p[2].append(v.bias)
-        if isinstance(v, torch.nn.BatchNorm2d):
-            p[1].append(v.weight)
-        elif hasattr(v, "weight") and isinstance(v.weight, torch.nn.Parameter):
-            p[0].append(v.weight)
-
-    optimizer = torch.optim.SGD(p[2], params["lr0"], params["momentum"], nesterov=True)
-
-    optimizer.add_param_group({"params": p[0], "weight_decay": params["weight_decay"]})
-    optimizer.add_param_group({"params": p[1]})
-    del p
-
-    # Scheduler
-    lr = learning_rate(args, params)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr, last_epoch=-1)
-
-    # EMA
-    ema = util.EMA(model) if args.local_rank == 0 else None
-
-    directory = "dataset\\images\\train"
-    filenames = [
-        os.path.join(directory, f)
-        for f in os.listdir(directory)
-        if os.path.isfile(os.path.join(directory, f))
-    ]
-
-    dataset = Dataset(filenames, args.input_size, params, True)
-
-    if args.world_size <= 1:
-        sampler = None
-    else:
-        sampler = data.distributed.DistributedSampler(dataset)
-
-    loader = data.DataLoader(
-        dataset,
-        args.batch_size,
-        sampler is None,
-        sampler,
-        num_workers=8,
-        pin_memory=True,
-        collate_fn=Dataset.collate_fn,
-    )
-
-    if args.world_size > 1:
-        # DDP mode
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = torch.nn.parallel.DistributedDataParallel(
-            module=model, device_ids=[args.local_rank], output_device=args.local_rank
-        )
-
-    # Start training
-    best = 0
-    num_batch = len(loader)
-    amp_scale = torch.cuda.amp.GradScaler()
-    criterion = util.ComputeLoss(model, params)
-    num_warmup = max(round(params["warmup_epochs"] * num_batch), 1000)
-    with open("weights/step.csv", "w") as f:
-        if args.local_rank == 0:
-            writer = csv.DictWriter(f, fieldnames=["epoch", "mAP@50", "mAP"])
-            writer.writeheader()
-        for epoch in range(args.epochs):
-            model.train()
-
-            if args.epochs - epoch == 10:
-                loader.dataset.mosaic = False
-
-            m_loss = util.AverageMeter()
-            if args.world_size > 1:
-                sampler.set_epoch(epoch)
-            p_bar = enumerate(loader)
-            if args.local_rank == 0:
-                print(("\n" + "%10s" * 3) % ("epoch", "memory", "loss"))
-            if args.local_rank == 0:
-                p_bar = tqdm.tqdm(p_bar, total=num_batch)  # progress bar
-
-            optimizer.zero_grad()
-
-            for i, (samples, targets, _) in p_bar:
-                x = i + num_batch * epoch  # number of iterations
-                samples = samples.cuda().float() / 255
-                targets = targets.cuda()
-
-                # Warmup
-                if x <= num_warmup:
-                    xp = [0, num_warmup]
-                    fp = [1, 64 / (args.batch_size * args.world_size)]
-                    accumulate = max(1, numpy.interp(x, xp, fp).round())
-                    for j, y in enumerate(optimizer.param_groups):
-                        if j == 0:
-                            fp = [params["warmup_bias_lr"], y["initial_lr"] * lr(epoch)]
-                        else:
-                            fp = [0.0, y["initial_lr"] * lr(epoch)]
-                        y["lr"] = numpy.interp(x, xp, fp)
-                        if "momentum" in y:
-                            fp = [params["warmup_momentum"], params["momentum"]]
-                            y["momentum"] = numpy.interp(x, xp, fp)
-
-                # Forward
-                with torch.cuda.amp.autocast():
-                    outputs = model(samples)  # forward
-                loss = criterion(outputs, targets)
-
-                m_loss.update(loss.item(), samples.size(0))
-
-                loss *= args.batch_size  # loss scaled by batch_size
-                loss *= args.world_size  # gradient averaged between devices in DDP mode
-
-                # Backward
-                amp_scale.scale(loss).backward()
-
-                # Optimize
-                if x % accumulate == 0:
-                    amp_scale.unscale_(optimizer)  # unscale gradients
-                    util.clip_gradients(model)  # clip gradients
-                    amp_scale.step(optimizer)  # optimizer.step
-                    amp_scale.update()
-                    optimizer.zero_grad()
-                    if ema:
-                        ema.update(model)
-
-                # Log
-                if args.local_rank == 0:
-                    memory = f"{torch.cuda.memory_reserved() / 1E9:.3g}G"  # (GB)
-                    s = ("%10s" * 2 + "%10.4g") % (
-                        f"{epoch + 1}/{args.epochs}",
-                        memory,
-                        m_loss.avg,
-                    )
-                    p_bar.set_description(s)
-
-                del loss
-                del outputs
-
-            # Scheduler
-            scheduler.step()
-
-            if args.local_rank == 0:
-                # mAP
-                last = test(args, params, ema.ema)
-                writer.writerow(
-                    {
-                        "mAP": str(f"{last[1]:.3f}"),
-                        "epoch": str(epoch + 1).zfill(3),
-                        "mAP@50": str(f"{last[0]:.3f}"),
-                    }
-                )
-                f.flush()
-
-                # Update best mAP
-                if last[1] > best:
-                    best = last[1]
-
-                # Save model
-                ckpt = {"model": copy.deepcopy(ema.ema).half()}
-
-                # Save last, best and delete
-                torch.save(ckpt, "./weights/ft_last.pt")
-                if best == last[1]:
-                    torch.save(ckpt, "./weights/ft_best.pt")
-                del ckpt
-
-    if args.local_rank == 0:
-        util.strip_optimizer("./weights/ft_best.pt")  # strip optimizers
-        util.strip_optimizer("./weights/ft_last.pt")  # strip optimizers
-
-    torch.cuda.empty_cache()
 
 
 def main():
@@ -603,9 +498,10 @@ def main():
     parser.add_argument("--train", action="store_true")
     parser.add_argument("--test", action="store_true")
     parser.add_argument(
-        "--finetune",
-        action="store_true",
+        "--image_path",
+        default="dataset\\images\\valid\\1-fps-2_00007_jpeg_jpg.rf.4806a19c10009675be12cfc66d372e4c.jpg",
     )
+    parser.add_argument("--predict", action="store_true")
 
     args = parser.parse_args()
 
@@ -630,8 +526,8 @@ def main():
         train(args, params)
     if args.test:
         test(args, params)
-    if args.finetune:
-        finetune(args, params)
+    if args.predict:
+        predict(args, params)
 
 
 if __name__ == "__main__":
